@@ -519,7 +519,7 @@ def pulisci_testo_espanso(testo):
     
     # Rimozioni specifiche per diverse piattaforme
     testo = re.sub(r'pubblicat[oae]\s+il\s+\d{1,2}\s+\w+\s+\d{4}', '', testo)
-    testo = re.sub(r'data\s+dell[\'']?esperienza:.*', '', testo, flags=re.IGNORECASE)
+    testo = re.sub(r'data\s+dell[\'"]?esperienza:.*', '', testo, flags=re.IGNORECASE)
     testo = re.sub(r'verificat[aoe]', '', testo)
     testo = re.sub(r'\d+\s+(gennaio|febbraio|marzo|aprile|maggio|giugno|luglio|agosto|settembre|ottobre|novembre|dicembre)\s+\d{4}', '', testo)
     
