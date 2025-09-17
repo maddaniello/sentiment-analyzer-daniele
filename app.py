@@ -271,14 +271,28 @@ def is_review_relevant(url, title, snippet, brand_name):
     return has_review_keyword or is_review_platform
 
 def scrapa_contenuto_generico(url, platform_type='generic'):
-    """Scraper generico per diversi tipi di piattaforme"""
+    """Scraper generico per diversi tipi di piattaforme con debugging"""
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "it-IT,it;q=0.8,en-US;q=0.5,en;q=0.3",
+        "Accept-Encoding": "gzip, deflate",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
     }
     
+    # Skip problematic platforms
+    if platform_type in ['generic'] and any(blocked in url.lower() for blocked in ['tiktok.com', 'youtube.com', 'instagram.com']):
+        print(f"Skipping {platform_type} URL (requires JS): {url}")
+        return []
+    
     try:
-        response = requests.get(url, headers=headers, timeout=15)
+        print(f"Scraping {platform_type}: {url}")
+        response = requests.get(url, headers=headers, timeout=20)
+        print(f"Status code: {response.status_code}")
+        
         if response.status_code != 200:
+            print(f"Failed to fetch {url}: Status {response.status_code}")
             return []
         
         soup = BeautifulSoup(response.content, 'html.parser')
@@ -297,31 +311,87 @@ def scrapa_contenuto_generico(url, platform_type='generic'):
         else:
             recensioni = scrapa_generico(soup, url)
         
+        print(f"Extracted {len(recensioni)} reviews from {url}")
         return recensioni
         
     except Exception as e:
-        st.warning(f"Errore scraping {url}: {e}")
+        print(f"Error scraping {url}: {e}")
         return []
 
 def scrapa_trustpilot(soup, url):
-    """Scraper specifico per Trustpilot"""
+    """Scraper specifico per Trustpilot con selettori multipli"""
     recensioni = []
-    containers = soup.find_all('article', {'data-service-review-rating': True})
+    
+    # Prova diversi selettori per Trustpilot
+    selettori_possibili = [
+        'article[data-service-review-rating]',
+        'div[data-service-review-rating]',
+        'section[data-testid="reviews.review"]',
+        'div[data-testid="reviews.review"]',
+        'article[data-testid="reviews.review"]',
+        '.review-content-wrap',
+        '.review',
+        'section[id^="review"]'
+    ]
+    
+    containers = []
+    for selettore in selettori_possibili:
+        containers = soup.select(selettore)
+        if containers:
+            print(f"Found {len(containers)} containers with selector: {selettore}")
+            break
+    
+    if not containers:
+        print("No review containers found, trying general text extraction")
+        # Fallback: cerca tutto il testo che potrebbe essere una recensione
+        all_text = soup.get_text()
+        if 'stelle' in all_text.lower() or 'rating' in all_text.lower():
+            # Dividi il testo in blocchi e cerca quelli che sembrano recensioni
+            paragraphs = soup.find_all('p')
+            for p in paragraphs:
+                text = p.get_text(strip=True)
+                if len(text) > 50 and any(word in text.lower() for word in ['buon', 'ottim', 'consiglio', 'soddisfatt', 'servizio', 'prodotto']):
+                    containers.append(p)
     
     for container in containers:
         try:
             testo = container.get_text(separator=" ", strip=True)
-            rating_elem = container.get('data-service-review-rating')
-            rating = int(rating_elem) if rating_elem else None
             
-            if testo and len(testo) > 30:
-                recensioni.append({
-                    'testo': testo,
-                    'rating': rating,
-                    'source_url': url,
-                    'platform': 'trustpilot'
-                })
-        except:
+            if not testo or len(testo) < 30:
+                continue
+                
+            # Estrai rating con metodi multipli
+            rating = None
+            
+            # Metodo 1: attributo data
+            if hasattr(container, 'get'):
+                rating_attr = container.get('data-service-review-rating')
+                if rating_attr:
+                    rating = int(rating_attr)
+            
+            # Metodo 2: cerca nel parent
+            if not rating:
+                parent = container.find_parent()
+                if parent:
+                    rating_elem = parent.find('[data-service-review-rating]')
+                    if rating_elem:
+                        rating = int(rating_elem.get('data-service-review-rating', 0))
+            
+            # Metodo 3: cerca pattern nel testo
+            if not rating:
+                rating_match = re.search(r'(\d)\s*stell[ae]|valutato\s*(\d)', testo.lower())
+                if rating_match:
+                    rating = int(rating_match.group(1) or rating_match.group(2))
+            
+            recensioni.append({
+                'testo': testo,
+                'rating': rating,
+                'source_url': url,
+                'platform': 'trustpilot'
+            })
+            
+        except Exception as e:
+            print(f"Error extracting review: {e}")
             continue
     
     return recensioni
@@ -558,31 +628,52 @@ def get_stopwords():
         "facebook", "google", "maps", "amazon", "reddit", "trustpilot"
     ])
 
-def elabora_fonti_parallele(fonti_trovate, max_workers=5, progress_bar=None, status_text=None):
-    """Elabora le fonti in parallelo per velocizzare il processo"""
+def elabora_fonti_parallele(fonti_trovate, max_workers=3, progress_bar=None, status_text=None):
+    """Elabora le fonti in parallelo con debugging migliorato"""
     tutte_recensioni = []
     statistiche_fonti = {}
+    debug_info = []
     
     def scrapa_fonte(fonte):
         url = fonte['url']
         platform = fonte['platform']
         
         try:
+            print(f"Processing: {platform} - {url}")
             recensioni = scrapa_contenuto_generico(url, platform)
+            
+            debug_info.append({
+                'url': url,
+                'platform': platform,
+                'recensioni_trovate': len(recensioni),
+                'successo': True
+            })
+            
             return {
                 'fonte': fonte,
                 'recensioni': recensioni,
                 'successo': True
             }
         except Exception as e:
+            error_msg = str(e)
+            print(f"Error processing {url}: {error_msg}")
+            
+            debug_info.append({
+                'url': url,
+                'platform': platform,
+                'recensioni_trovate': 0,
+                'successo': False,
+                'errore': error_msg
+            })
+            
             return {
                 'fonte': fonte,
                 'recensioni': [],
                 'successo': False,
-                'errore': str(e)
+                'errore': error_msg
             }
     
-    # Processa in parallelo con ThreadPoolExecutor
+    # Riduciamo i worker per evitare rate limiting
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_fonte = {executor.submit(scrapa_fonte, fonte): fonte for fonte in fonti_trovate}
         
@@ -605,9 +696,19 @@ def elabora_fonti_parallele(fonti_trovate, max_workers=5, progress_bar=None, sta
                     rec['fonte_snippet'] = fonte['snippet']
                 
                 tutte_recensioni.extend(recensioni)
-                statistiche_fonti[fonte['platform']] = statistiche_fonti.get(fonte['platform'], 0) + len(recensioni)
+                platform = fonte['platform']
+                statistiche_fonti[platform] = statistiche_fonti.get(platform, 0) + len(recensioni)
             
-            time.sleep(0.5)  # Rate limiting
+            time.sleep(2)  # Rate limiting più conservativo
+    
+    # Mostra debug info in Streamlit
+    if debug_info:
+        with st.expander("🔧 Debug Info - Risultati Scraping"):
+            for info in debug_info[:20]:  # Mostra solo i primi 20
+                status = "✅" if info['successo'] else "❌"
+                st.text(f"{status} {info['platform']}: {info['recensioni_trovate']} recensioni - {info['url'][:60]}...")
+                if not info['successo']:
+                    st.text(f"   Errore: {info.get('errore', 'Unknown error')}")
     
     return tutte_recensioni, statistiche_fonti
 
